@@ -1,96 +1,156 @@
-# Whisper Telegram bot
-## Описание
-Простой телеграм бот, который извлекает из аудио слова.
+# 🎧 Whisper Telegram Bot
 
-Работает с бэкэндом [faster-whisper-fastapi](https://github.com/cucumberian/faster-whisper-fastapi/tree/main), который и занимается обработкой аудио.
-Бэкэнд сделан на основе модели whisper от openai: https://github.com/openai/whisper.
+[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://docker.com)
+
+Телеграм бот для транскрипции аудио сообщений с помощью Whisper AI от OpenAI.
+
+## ✨ Возможности
+
+- 🎤 Транскрипция голосовых сообщений
+- 📁 Обработка аудио файлов
+- 🎬 Извлечение звука из видео
+- 📝 Поддержка различных форматов медиа
+- 🔍 Логирование в MongoDB (опционально)
+- 🐳 Контейнеризация с Docker
+
+## 🔧 Технические детали
+
+Бот работает совместно с [faster-whisper-fastapi](https://github.com/cucumberian/faster-whisper-fastapi) бэкэндом, который выполняет обработку аудио на основе модели [Whisper от OpenAI](https://github.com/openai/whisper).
 
 
 
-## Работа с ботом
-Перетянуть или переслать боту аудио сообщение или аудио файл.
-После его обработки бот в ответ отправит переведенный текст.
+## 📱 Использование
 
-## Типы сообщений
-Бот работает с файлами ___меньше 20 МБ__.
-Бот работает с сообщениями содержащими:
-- аудио файлы
-- голосовые сообщения
-- видео
-- видео-записки
-- документы
+1. Отправьте боту аудио сообщение или файл
+2. Дождитесь обработки
+3. Получите транскрипцию в текстовом виде
 
-## Установка и запуск
+## 📋 Поддерживаемые форматы
 
-### Напрямую 
+**Ограничения:** файлы до 20 МБ
 
-1. __Переменные окружения__
-    Бот использует переменную окружения `WHISPER_MIBOT_TOKEN` и `WHISPER_BACKEND_URL`.
-    Первая задаёт токен для бота, полученный от `@BotFather` в телеграмме.
-    Вторая определяет адрес сервиса для извлечения текста из речи.
+**Поддерживаемые типы:**
+- 🎵 Аудио файлы (MP3, WAV, M4A и др.)
+- 🎤 Голосовые сообщения
+- 🎥 Видео файлы
+- 📹 Видео-записки (кружочки)
+- 📎 Документы с медиа-контентом
 
-    Задать данные переменные окружения можно _любым удобным способом_,
-    например, вписав их значения напрямую в конфиг `config.py`.
+## 🚀 Быстрый старт
 
-2. __Установка зависимостей и запуск__
-    Переходим в каталог с программой и устанавливаем зависимости для python 3.9+
-    ```shell
-    cd src
-    pip3 install -r requirements.txt
-    python app.py
-    ```
-### docker-compose
+### 📋 Предварительные требования
 
-1. Создаете файл `.env` рядом с `docker-compose.yml` c переменными окружения.
-    ```shell
-    WHISPER_MIBOT_TOKEN="<bot_token>"
-    WHISPER_BACKEND_URL="<http://127.0.0.1:8000/transcribe>"
-    ```
-2. Запускаете
-    ```shell
-    docker-compose up -d
-    ```
+- Python 3.9+
+- Токен бота от [@BotFather](https://t.me/BotFather)
+- Запущенный [faster-whisper-fastapi](https://github.com/cucumberian/faster-whisper-fastapi) бэкэнд
 
-### Запуск как сервиса в Linux
-Создать файл `/etc/systemd/system/whisper-mibot.service` со следующим содержимым:
-```conf
+### ⚙️ Переменные окружения
+
+Создайте файл `.env` или установите переменные:
+
+```env
+WHISPER_MIBOT_TOKEN=your_bot_token_here
+WHISPER_BACKEND_URL=http://127.0.0.1:8000/transcribe
+```
+
+### 🐍 Запуск без Docker
+
+```bash
+# Клонируйте репозиторий
+git clone https://github.com/A-Levin/whisper-telegram-bot.git
+cd whisper-telegram-bot
+
+# Установите зависимости
+cd src
+pip install -r requirements.txt
+
+# Запустите бота
+python app.py
+```
+### 🐳 Запуск с Docker
+
+1. Создайте файл `.env`:
+```env
+WHISPER_MIBOT_TOKEN=your_bot_token_here
+WHISPER_BACKEND_URL=http://127.0.0.1:8000/transcribe
+```
+
+2. Запустите контейнер:
+```bash
+docker-compose up -d
+```
+
+### 🔧 Запуск как systemd сервис
+
+1. Создайте файл `/etc/systemd/system/whisper-mibot.service`:
+```ini
 [Unit]
-Description=Telegram bot whisper-mibot
-After=syslog.target
-After=network.target
+Description=Whisper Telegram Bot
+After=syslog.target network.target
 
 [Service]
 Type=simple
-User=<username>
-Group=<usergroup>
-WorkingDirectory=/home/<username>/whisper_mibot
-ExecStart=/home/<username>/whisper_mibot/.venv/bin/python3 /home/<username>/whisper_mibot/app.py
+User=your_username
+Group=your_usergroup
+WorkingDirectory=/path/to/whisper-telegram-bot/src
+ExecStart=/path/to/python3 /path/to/whisper-telegram-bot/src/app.py
 RestartSec=30
 Restart=always
 KillMode=control-group
-EnvironmentFile=/home/<username>/whisper_mibot/.env
+EnvironmentFile=/path/to/.env
 
 [Install]
 WantedBy=multi-user.target
 ```
-, в котором вместо `<username>` и `<usergroup>` подставить имя пользователя и группу пользователя, от имени которого будет запускаться сервис.
-Важно указать в параметре `ExecStart` правильный путь до интерпретатора python и путь до файла программы `app.py`.
-Параметр `EnvironmentFile` указывает путь до файла `.env`, в котором записана переменная окружения `WHISPER_MIBOT_TOKEN` и `WHISPER_BACKEND_URL`.
-Пример файла `.env`:
-```env
-WHISPER_MIBOT_TOKEN="<bot_token>"
-WHISPER_BACKEND_URL="<http://127.0.0.1:8000/transcribe>"
-```
 
-Далее включить и запустить сервис командами:
-```shell
+2. Включите и запустите сервис:
+```bash
 sudo systemctl enable whisper-mibot.service
 sudo systemctl start whisper-mibot.service
+sudo systemctl status whisper-mibot.service
 ```
 
-## Логирование
-Имеется возможность логирования событий в базу данных MongoDB.
-При логировании записывается __хеш__ (_получаемый из имени и телеграм ид пользователя_) и __время обращения__ к боту. Если переменная со строкой подключения с MongoDB будет не определена, то запись событий не происходит.
-Настройки MongoDB Находятся в файле `consfig.py` и определяются двумя параметрами:
-- `MongoDB_string` - строка подключения к монго
-- `MongoDB_db_name` - имя базы данных
+## 📊 Логирование (опционально)
+
+Бот поддерживает логирование событий в MongoDB для аналитики использования.
+
+### Что логируется:
+- 🔐 Хеш пользователя (на основе имени и Telegram ID)
+- ⏰ Время обращения к боту
+- 📈 Статистика использования
+
+### Настройка MongoDB
+
+Добавьте в `.env` или `config.py`:
+```env
+MONGODB_CONNECTION_STRING=mongodb://localhost:27017
+MONGODB_DATABASE_NAME=whisper_bot_logs
+```
+
+**Примечание:** Если MongoDB не настроена, логирование просто отключается без ошибок.
+
+## 🤝 Вклад в проект
+
+1. Форкните репозиторий
+2. Создайте feature branch (`git checkout -b feature/amazing-feature`)
+3. Закоммитьте изменения (`git commit -m 'Add amazing feature'`)
+4. Запушьте branch (`git push origin feature/amazing-feature`)
+5. Откройте Pull Request
+
+## 📄 Лицензия
+
+Этот проект распространяется под лицензией MIT. См. файл [LICENSE](LICENSE) для подробностей.
+
+## 🆘 Поддержка
+
+Если у вас возникли проблемы или есть вопросы:
+
+- 🐛 [Создайте Issue](https://github.com/A-Levin/whisper-telegram-bot/issues)
+- 💬 Опишите проблему максимально подробно
+- 📋 Приложите логи, если возможно
+
+---
+
+⭐ **Поставьте звезду, если проект оказался полезным!**

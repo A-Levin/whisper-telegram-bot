@@ -8,5 +8,12 @@ services:
     restart: always
     env_file: .env
     environment:
-      - WHISPER_MIBOT_TOKEN:${WHISPER_MIBOT_TOKEN}
-      - WHISPER_BACKEND_URL:${WHISPER_BACKEND_URL}
+      - WHISPER_MIBOT_TOKEN=${WHISPER_MIBOT_TOKEN}
+      - WHISPER_BACKEND_URL=http://faster-whisper-fastapi-faster-whisper-1:8000/transcribe  # Используем точное имя контейнера
+    networks:
+      - whisper_network  # Подключение к общей сети
+
+networks:
+  whisper_network:
+    external: true  # Используем уже созданную сеть
+

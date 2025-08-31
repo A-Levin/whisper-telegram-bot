@@ -15,7 +15,10 @@ from service.aiogram_service import send_long_message
 from config import Config
 
 from service.whisper_service import WhisperAPI
+import logging
 
+
+logging.basicConfig(level=logging.DEBUG)
 
 bot = Bot(token=Config.WHISPER_MIBOT_TOKEN)
 dp = Dispatcher()
