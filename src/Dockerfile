@@ -1,19 +1,10 @@
-FROM python:3.12-alpine3.20
+FROM python:3.11-slim
 
-ENV USER_HOME=/home/app/
-ENV APP_HOME=${USER_HOME}/app/
+WORKDIR /app
 
-RUN mkdir -p ${APP_HOME}
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-WORKDIR ${APP_HOME}
+COPY app.py .
 
-COPY requirements.freeze .
-
-RUN pip install --no-cache-dir -r requirements.freeze
-
-COPY . .
-
-RUN addgroup --system app
-RUN adduser -S -G app app
-RUN chown -R app:app ${USER_HOME}
-USER app
+CMD ["python", "app.py"]

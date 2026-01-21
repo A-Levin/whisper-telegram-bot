@@ -1,19 +1,10 @@
-version: "3"
-
 services:
   whisper-mibot:
     build: ./src
-    command: sh -c "python app.py"
     container_name: whisper-mibot
-    restart: always
-    env_file: .env
+    restart: unless-stopped
     environment:
-      - WHISPER_MIBOT_TOKEN=${WHISPER_MIBOT_TOKEN}
-      - WHISPER_BACKEND_URL=http://faster-whisper-fastapi-faster-whisper-1:8000/transcribe  # Используем точное имя контейнера
-    networks:
-      - whisper_network  # Подключение к общей сети
-
-networks:
-  whisper_network:
-    external: true  # Используем уже созданную сеть
-
+      - BOT_TOKEN=${BOT_TOKEN}
+      - VOICE_TYPE_URL=http://host.docker.internal:9876
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
