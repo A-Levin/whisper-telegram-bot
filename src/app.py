@@ -31,7 +31,7 @@ async def transcribe(file_id: str) -> dict | None:
         tmp_path = tmp.name
 
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             with open(tmp_path, "rb") as f:
                 r = await client.post(
                     f"{VOICE_TYPE_URL}/transcribe",
@@ -121,6 +121,8 @@ async def handle_audio(message: Message):
             await msg.edit_text("🤷 Пусто")
     except httpx.ConnectError:
         await msg.edit_text("❌ Сервис недоступен")
+    except httpx.ReadTimeout:
+        await msg.edit_text("⏱ Таймаут — файл слишком длинный, попробуй ещё раз")
     except Exception as e:
         logger.exception("Error")
         error = f"❌ {html.escape(str(e), quote=False)}"
