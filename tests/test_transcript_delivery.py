@@ -450,3 +450,26 @@ async def test_error_text_with_html_chars_is_shown_verbatim(monkeypatch, telegra
 
     assert not any("🎤" in m for m in messages), messages
     assert any("❌" in m and detail in m for m in messages), messages
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "😀a" * 5000,
+        "😀a" * 2000,
+        " ".join(f"😀слово{i:04d}🎉" for i in range(1200)),
+    ],
+    ids=["no_spaces_long", "no_spaces_under_codepoint_limit", "with_spaces"],
+)
+async def test_text_with_non_bmp_chars_is_delivered_in_full(monkeypatch, telegram, text):
+    messages = await deliver(monkeypatch, telegram, text, duration=900.0)
+
+    assert len(messages) >= 2
+    assert_within_limit(messages)
+    for m in messages:
+        m.encode("utf-16-le")
+    bodies = split_body(messages, caption("ru", 900.0))
+    if " " in text:
+        assert norm(" ".join(bodies)) == norm(text)
+    else:
+        assert "".join(b.strip() for b in bodies) == text
