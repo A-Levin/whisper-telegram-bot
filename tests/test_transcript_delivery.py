@@ -1,11 +1,13 @@
+import asyncio
 import datetime
 import re
+import time
 from typing import Any
 
 import pytest
 from aiogram.client.default import Default
 from aiogram.client.session.base import BaseSession
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.methods import DeleteMessage, EditMessageText, SendMessage, TelegramMethod
 from aiogram.types import Chat, Message, Update, User, Voice
 
@@ -23,10 +25,17 @@ ALLOWED_TAGS = {
 TAG_RE = re.compile(r"</?([a-zA-Z][a-zA-Z0-9-]*)(\s[^<>]*)?>")
 ENTITY_RE = re.compile(r"&(lt|gt|amp|quot|#[0-9]+|#x[0-9a-fA-F]+);")
 NAMED = {"lt": "<", "gt": ">", "amp": "&", "quot": '"'}
+ITALIC_TAGS = {"i", "em"}
 
 
-def parse_html(raw: str, method: TelegramMethod) -> str:
+def u16(s: str) -> int:
+    return len(s.encode("utf-16-le")) // 2
+
+
+def parse_html(raw: str, method: TelegramMethod) -> tuple[str, str]:
     out = []
+    italic = []
+    depth = 0
     i = 0
     while i < len(raw):
         ch = raw[i]
@@ -37,7 +46,10 @@ def parse_html(raw: str, method: TelegramMethod) -> str:
                     method=method,
                     message=f"Bad Request: can't parse entities: unsupported start tag at byte offset {i}",
                 )
+            if m.group(1).lower() in ITALIC_TAGS:
+                depth += -1 if raw[i + 1] == "/" else 1
             i = m.end()
+            continue
         elif ch == ">":
             raise TelegramBadRequest(
                 method=method, message=f"Bad Request: can't parse entities: unexpected '>' at {i}"
@@ -50,16 +62,27 @@ def parse_html(raw: str, method: TelegramMethod) -> str:
                 )
             name = m.group(1)
             if name in NAMED:
-                out.append(NAMED[name])
+                ch = NAMED[name]
             elif name.startswith("#x"):
-                out.append(chr(int(name[2:], 16)))
+                ch = chr(int(name[2:], 16))
             else:
-                out.append(chr(int(name[1:])))
+                ch = chr(int(name[1:]))
             i = m.end()
         else:
-            out.append(ch)
             i += 1
-    return "".join(out)
+        out.append(ch)
+        if depth > 0:
+            italic.append(ch)
+    return "".join(out), "".join(italic)
+
+
+def italic_from_entities(text: str, entities) -> str:
+    encoded = text.encode("utf-16-le")
+    parts = []
+    for e in entities or []:
+        if e.type == "italic":
+            parts.append(encoded[2 * e.offset : 2 * (e.offset + e.length)].decode("utf-16-le"))
+    return "".join(parts)
 
 
 class FakeTelegram(BaseSession):
@@ -67,6 +90,40 @@ class FakeTelegram(BaseSession):
         super().__init__()
         self.next_id = 100
         self.messages: dict[int, str] = {}
+        self.italic: dict[int, str] = {}
+        self.text_calls = 0
+        self.flood_at: dict[int, int] = {}
+        self.fail_at: set[int] = set()
+        self.slept = 0.0
+        self.started = time.monotonic()
+        self.blocked_until = 0.0
+        self.flood_hits = 0
+
+    def now(self) -> float:
+        return self.slept + time.monotonic() - self.started
+
+    def _faults(self, method, visible: str) -> None:
+        if self.now() < self.blocked_until:
+            self.flood_hits += 1
+            if self.flood_hits > 50:
+                raise AssertionError("bot keeps hitting flood control without waiting")
+            wait = int(self.blocked_until - self.now()) + 1
+            raise TelegramRetryAfter(
+                method=method, message=f"Flood control exceeded. Retry in {wait} seconds", retry_after=wait
+            )
+        if visible.startswith("🎤"):
+            return
+        n = self.text_calls
+        self.text_calls += 1
+        if n in self.flood_at:
+            wait = self.flood_at.pop(n)
+            self.blocked_until = self.now() + wait
+            raise TelegramRetryAfter(
+                method=method, message=f"Flood control exceeded. Retry in {wait} seconds", retry_after=wait
+            )
+        if n in self.fail_at:
+            self.fail_at.discard(n)
+            raise TelegramBadRequest(method=method, message="Bad Request: message to send is invalid")
 
     async def close(self) -> None:
         pass
@@ -75,22 +132,23 @@ class FakeTelegram(BaseSession):
         raise AssertionError("no downloads expected in tests")
         yield b""
 
-    def _visible(self, bot, method) -> str:
+    def _visible(self, bot, method) -> tuple[str, str]:
         parse_mode = method.parse_mode
         if isinstance(parse_mode, Default):
             parse_mode = bot.default[parse_mode.name]
         text = method.text
         if parse_mode is None:
-            visible = text
+            visible, italic = text, italic_from_entities(text, method.entities)
         elif str(getattr(parse_mode, "value", parse_mode)).upper() == "HTML":
-            visible = parse_html(text, method)
+            visible, italic = parse_html(text, method)
         else:
             raise AssertionError(f"test fake does not render parse_mode={parse_mode!r}")
         if not visible.strip():
             raise TelegramBadRequest(method=method, message="Bad Request: message text is empty")
-        if len(visible) > TELEGRAM_LIMIT:
+        if u16(visible) > TELEGRAM_LIMIT:
             raise TelegramBadRequest(method=method, message="Bad Request: MESSAGE_TOO_LONG")
-        return visible
+        self._faults(method, visible)
+        return visible, italic
 
     def _message(self, message_id: int, text: str) -> Message:
         return Message(
@@ -103,17 +161,20 @@ class FakeTelegram(BaseSession):
 
     async def make_request(self, bot, method, timeout=None):
         if isinstance(method, SendMessage):
-            visible = self._visible(bot, method)
+            visible, italic = self._visible(bot, method)
             self.next_id += 1
             self.messages[self.next_id] = visible
+            self.italic[self.next_id] = italic
             return self._message(self.next_id, visible).as_(bot)
         if isinstance(method, EditMessageText):
-            visible = self._visible(bot, method)
+            visible, italic = self._visible(bot, method)
             assert method.message_id in self.messages, "edit of unknown message"
             self.messages[method.message_id] = visible
+            self.italic[method.message_id] = italic
             return self._message(method.message_id, visible).as_(bot)
         if isinstance(method, DeleteMessage):
             self.messages.pop(method.message_id, None)
+            self.italic.pop(method.message_id, None)
             return True
         if method.__returning__ is bool:
             return True
@@ -122,11 +183,20 @@ class FakeTelegram(BaseSession):
     def chat(self) -> list[str]:
         return [self.messages[k] for k in sorted(self.messages)]
 
+    def chat_italic(self) -> list[str]:
+        return [self.italic[k] for k in sorted(self.italic)]
+
 
 @pytest.fixture
 def telegram(monkeypatch):
     fake = FakeTelegram()
     monkeypatch.setattr(app.bot, "session", fake)
+
+    async def virtual_sleep(delay, result=None):
+        fake.slept += delay
+        return result
+
+    monkeypatch.setattr(asyncio, "sleep", virtual_sleep)
     return fake
 
 
@@ -134,6 +204,10 @@ async def deliver(monkeypatch, telegram, text, lang="ru", duration=12.5) -> list
     async def fake_transcribe(file_id):
         return {"text": text, "language": lang, "audio_duration": duration}
 
+    return await deliver_with(monkeypatch, telegram, fake_transcribe, duration)
+
+
+async def deliver_with(monkeypatch, telegram, fake_transcribe, duration=12.5) -> list[str]:
     monkeypatch.setattr(app, "transcribe", fake_transcribe)
     incoming = Message(
         message_id=1,
@@ -165,7 +239,7 @@ def norm(s: str) -> str:
 
 def assert_within_limit(messages: list[str]) -> None:
     for n, m in enumerate(messages):
-        assert len(m) <= TELEGRAM_LIMIT, f"message #{n} has {len(m)} chars"
+        assert u16(m) <= TELEGRAM_LIMIT, f"message #{n} has {u16(m)} UTF-16 units"
 
 
 def numbered_words(count: int) -> str:
@@ -271,3 +345,108 @@ async def test_long_html_special_chars_without_spaces_are_delivered_verbatim(mon
     assert_within_limit(messages)
     bodies = split_body(messages, caption("ru", 900.0))
     assert "".join(b.strip() for b in bodies) == text
+
+
+def ascii_text(length: int) -> str:
+    text = ("abcdefg " * (length // 8 + 2))[:length]
+    return text[:-1] + "z" if text.endswith(" ") else text
+
+
+SHORT_CAPTION = caption("ru", 12.5)
+CAPTION_BUDGET = TELEGRAM_LIMIT - 2 - u16(SHORT_CAPTION)
+
+
+async def test_short_reply_is_text_blank_line_and_italic_caption(monkeypatch, telegram):
+    text = "Привет, это короткое голосовое."
+    messages = await deliver(monkeypatch, telegram, text, duration=12.5)
+
+    assert messages == [f"{text}\n\n{SHORT_CAPTION}"]
+    assert telegram.chat_italic() == [SHORT_CAPTION]
+
+
+async def test_text_exactly_filling_one_message_with_caption_stays_single(monkeypatch, telegram):
+    text = ascii_text(CAPTION_BUDGET)
+    messages = await deliver(monkeypatch, telegram, text, duration=12.5)
+
+    assert messages == [f"{text}\n\n{SHORT_CAPTION}"]
+    assert u16(messages[0]) == TELEGRAM_LIMIT
+
+
+async def test_text_one_utf16_unit_over_is_split_into_two(monkeypatch, telegram):
+    text = ascii_text(CAPTION_BUDGET + 1)
+    messages = await deliver(monkeypatch, telegram, text, duration=12.5)
+
+    assert len(messages) == 2
+    assert_within_limit(messages)
+    bodies = split_body(messages, SHORT_CAPTION)
+    assert norm(" ".join(bodies)) == norm(text)
+
+
+async def test_single_word_one_utf16_unit_over_is_split_into_two(monkeypatch, telegram):
+    text = "a" * (CAPTION_BUDGET + 1)
+    messages = await deliver(monkeypatch, telegram, text, duration=12.5)
+
+    assert len(messages) == 2
+    assert_within_limit(messages)
+    bodies = split_body(messages, SHORT_CAPTION)
+    assert "".join(b.strip() for b in bodies) == text
+
+
+async def test_words_separated_only_by_newlines_are_not_cut(monkeypatch, telegram):
+    text = "\n".join(f"слово{i:05d}" for i in range(1500))
+    vocabulary = set(text.split())
+    messages = await deliver(monkeypatch, telegram, text, duration=2700.0)
+
+    assert len(messages) >= 4
+    assert_within_limit(messages)
+    bodies = split_body(messages, caption("ru", 2700.0))
+    for body in bodies:
+        broken = [w for w in body.split() if w not in vocabulary]
+        assert not broken, f"word cut in half: {broken[:3]}"
+    assert norm(" ".join(bodies)) == norm(text)
+
+
+@pytest.mark.parametrize("chunk", [0, 1, 2])
+async def test_flood_control_on_any_chunk_is_waited_out(monkeypatch, telegram, chunk):
+    text = numbered_words(1500)
+    telegram.flood_at = {chunk: 7}
+    messages = await deliver(monkeypatch, telegram, text, duration=2700.0)
+
+    assert telegram.slept >= 7
+    assert len(messages) >= 4
+    assert_within_limit(messages)
+    bodies = split_body(messages, caption("ru", 2700.0))
+    assert norm(" ".join(bodies)) == norm(text)
+
+
+async def test_unrecoverable_error_on_later_chunk_keeps_delivered_chunks(monkeypatch, telegram):
+    text = numbered_words(1500)
+    telegram.fail_at = {1}
+    messages = await deliver(monkeypatch, telegram, text, duration=2700.0)
+
+    errors = [n for n, m in enumerate(messages) if "❌" in m]
+    assert len(errors) == 1, messages
+    assert errors[0] > 0, "first chunk was overwritten by the error"
+    first = messages[0]
+    assert first.split() and norm(text).startswith(norm(first)), first[:200]
+    assert first.split()[-1] in set(text.split())
+
+
+async def test_whitespace_only_transcript_reports_empty(monkeypatch, telegram):
+    messages = await deliver(monkeypatch, telegram, "   \n ")
+
+    assert len(messages) == 1
+    assert "🤷" in messages[0]
+    assert "🌐" not in messages[0]
+
+
+async def test_error_text_with_html_chars_is_shown_verbatim(monkeypatch, telegram):
+    detail = 'boom <tag> & "quoted" &amp;'
+
+    async def failing_transcribe(file_id):
+        raise RuntimeError(detail)
+
+    messages = await deliver_with(monkeypatch, telegram, failing_transcribe)
+
+    assert not any("🎤" in m for m in messages), messages
+    assert any("❌" in m and detail in m for m in messages), messages
