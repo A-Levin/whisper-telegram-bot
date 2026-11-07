@@ -4,12 +4,13 @@ import re
 import time
 from typing import Any
 
+import httpx
 import pytest
 from aiogram.client.default import Default
 from aiogram.client.session.base import BaseSession
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
-from aiogram.methods import DeleteMessage, EditMessageText, SendMessage, TelegramMethod
-from aiogram.types import Chat, Message, Update, User, Voice
+from aiogram.methods import DeleteMessage, EditMessageText, GetFile, SendMessage, TelegramMethod
+from aiogram.types import Chat, File, Message, Update, User, Voice
 
 import app
 
@@ -129,8 +130,7 @@ class FakeTelegram(BaseSession):
         pass
 
     async def stream_content(self, *args: Any, **kwargs: Any):
-        raise AssertionError("no downloads expected in tests")
-        yield b""
+        yield b"OggS fake voice payload"
 
     def _visible(self, bot, method) -> tuple[str, str]:
         parse_mode = method.parse_mode
@@ -172,6 +172,8 @@ class FakeTelegram(BaseSession):
             self.messages[method.message_id] = visible
             self.italic[method.message_id] = italic
             return self._message(method.message_id, visible).as_(bot)
+        if isinstance(method, GetFile):
+            return File(file_id=method.file_id, file_unique_id="voice-uniq", file_path="voice/file_0.oga").as_(bot)
         if isinstance(method, DeleteMessage):
             self.messages.pop(method.message_id, None)
             self.italic.pop(method.message_id, None)
@@ -473,3 +475,63 @@ async def test_text_with_non_bmp_chars_is_delivered_in_full(monkeypatch, telegra
         assert norm(" ".join(bodies)) == norm(text)
     else:
         assert "".join(b.strip() for b in bodies) == text
+
+
+TIMEOUT_TEXT = "⏱ Таймаут — файл слишком длинный, попробуй ещё раз"
+
+
+@pytest.fixture
+def voice_type(monkeypatch):
+    calls = []
+
+    async def handle(transport, request):
+        calls.append(request)
+        if calls_behaviour["timeout"]:
+            raise httpx.ReadTimeout("timed out", request=request)
+        if calls_behaviour["connect"]:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(
+            200, json={"text": "Распознанный текст.", "language": "ru", "audio_duration": 1332.0}, request=request
+        )
+
+    calls_behaviour = {"timeout": False, "connect": False}
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+    return calls, calls_behaviour
+
+
+async def feed_voice(duration=1332):
+    incoming = Message(
+        message_id=1,
+        date=datetime.datetime.now(datetime.timezone.utc),
+        chat=CHAT,
+        from_user=USER,
+        voice=Voice(file_id="voice-file", file_unique_id="voice-uniq", duration=duration),
+    )
+    await app.dp.feed_update(app.bot, Update(update_id=1, message=incoming))
+
+
+async def test_voice_type_request_waits_at_least_300_seconds(telegram, voice_type):
+    calls, _ = voice_type
+    await feed_voice()
+
+    transcribe_calls = [r for r in calls if r.url.path.endswith("/transcribe")]
+    assert len(transcribe_calls) == 1, [str(r.url) for r in calls]
+    read_timeout = transcribe_calls[0].extensions["timeout"]["read"]
+    assert read_timeout is None or read_timeout >= 300, f"read timeout is {read_timeout}s"
+    assert telegram.chat()[0].startswith("Распознанный текст.")
+
+
+async def test_voice_type_read_timeout_shows_timeout_message(telegram, voice_type):
+    _, behaviour = voice_type
+    behaviour["timeout"] = True
+    await feed_voice()
+
+    assert telegram.chat() == [TIMEOUT_TEXT]
+
+
+async def test_voice_type_unreachable_is_not_reported_as_timeout(telegram, voice_type):
+    _, behaviour = voice_type
+    behaviour["connect"] = True
+    await feed_voice()
+
+    assert telegram.chat() == ["❌ Сервис недоступен"]
