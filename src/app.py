@@ -8,12 +8,14 @@ import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VOICE_TYPE_URL = os.getenv("VOICE_TYPE_URL", "http://host.docker.internal:9876")
 TELEGRAM_LIMIT = 4096
+FLOOD_RETRIES = 5
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -42,16 +44,33 @@ async def transcribe(file_id: str) -> dict | None:
     return None
 
 
+def utf16_len(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
 def split_text(text: str, limit: int) -> list[str]:
     chunks = []
-    while len(text) > limit:
-        cut = max(text.rfind(" ", 0, limit + 1), text.rfind("\n", 0, limit + 1))
+    while utf16_len(text) > limit:
+        fit = min(len(text), limit)
+        while utf16_len(text[:fit]) > limit:
+            fit -= (utf16_len(text[:fit]) - limit + 1) // 2
+        cut = max(text.rfind(" ", 0, fit + 1), text.rfind("\n", 0, fit + 1))
         if cut <= 0:
-            cut = limit
+            cut = fit
         chunks.append(text[:cut].rstrip())
         text = text[cut:].lstrip()
     chunks.append(text)
     return chunks
+
+
+async def send_waiting_flood(send):
+    for attempt in range(FLOOD_RETRIES):
+        try:
+            return await send()
+        except TelegramRetryAfter as e:
+            if attempt == FLOOD_RETRIES - 1:
+                raise
+            await asyncio.sleep(e.retry_after)
 
 
 @dp.message(Command("start"))
@@ -80,26 +99,35 @@ async def handle_audio(message: Message):
         return
 
     msg = await message.reply("🎤 ...")
+    delivered = False
 
     try:
         data = await transcribe(entity.file_id)
-        if data and data.get("text"):
-            text = data["text"].strip()
+        text = ((data or {}).get("text") or "").strip()
+        if text:
             lang = data.get("language", "?")
             dur = data.get("audio_duration", 0)
             caption = f"🌐 {lang} | ⏱ {dur:.1f}s"
-            chunks = [html.escape(c, quote=False) for c in split_text(text, TELEGRAM_LIMIT - len(caption) - 2)]
+            chunks = [
+                html.escape(c, quote=False)
+                for c in split_text(text, TELEGRAM_LIMIT - 2 - utf16_len(caption))
+            ]
             chunks[-1] += f"\n\n<i>{html.escape(caption, quote=False)}</i>"
-            await msg.edit_text(chunks[0])
+            await send_waiting_flood(lambda: msg.edit_text(chunks[0]))
+            delivered = True
             for chunk in chunks[1:]:
-                await message.answer(chunk)
+                await send_waiting_flood(lambda: message.answer(chunk))
         else:
             await msg.edit_text("🤷 Пусто")
     except httpx.ConnectError:
         await msg.edit_text("❌ Сервис недоступен")
     except Exception as e:
         logger.exception("Error")
-        await msg.edit_text(f"❌ {e}")
+        error = f"❌ {html.escape(str(e), quote=False)}"
+        if delivered:
+            await message.answer(error)
+        else:
+            await msg.edit_text(error)
 
 
 async def main():
