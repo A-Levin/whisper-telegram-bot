@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import tempfile
@@ -12,6 +13,7 @@ from aiogram.types import Message
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 VOICE_TYPE_URL = os.getenv("VOICE_TYPE_URL", "http://host.docker.internal:9876")
+TELEGRAM_LIMIT = 4096
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -38,6 +40,18 @@ async def transcribe(file_id: str) -> dict | None:
     finally:
         os.unlink(tmp_path)
     return None
+
+
+def split_text(text: str, limit: int) -> list[str]:
+    chunks = []
+    while len(text) > limit:
+        cut = max(text.rfind(" ", 0, limit + 1), text.rfind("\n", 0, limit + 1))
+        if cut <= 0:
+            cut = limit
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    chunks.append(text)
+    return chunks
 
 
 @dp.message(Command("start"))
@@ -73,7 +87,12 @@ async def handle_audio(message: Message):
             text = data["text"].strip()
             lang = data.get("language", "?")
             dur = data.get("audio_duration", 0)
-            await msg.edit_text(f"{text}\n\n<i>🌐 {lang} | ⏱ {dur:.1f}s</i>")
+            caption = f"🌐 {lang} | ⏱ {dur:.1f}s"
+            chunks = [html.escape(c, quote=False) for c in split_text(text, TELEGRAM_LIMIT - len(caption) - 2)]
+            chunks[-1] += f"\n\n<i>{html.escape(caption, quote=False)}</i>"
+            await msg.edit_text(chunks[0])
+            for chunk in chunks[1:]:
+                await message.answer(chunk)
         else:
             await msg.edit_text("🤷 Пусто")
     except httpx.ConnectError:
